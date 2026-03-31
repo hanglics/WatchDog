@@ -104,7 +104,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/cancel all — Cancel all your jobs\n"
         "/watch — Watch all active jobs\n"
         "/watch &lt;id1,id2,...&gt; — Watch specific jobs\n"
-        "/stop — Stop watching\n"
+        "/watch list — Show watched jobs\n"
+        "/stop all — Stop watching all jobs\n"
+        "/stop &lt;id1,id2,...&gt; — Stop watching specific jobs\n"
         "/pin &lt;job_id&gt; — Pin job to always show in /status\n"
         "/unpin &lt;job_id&gt; — Unpin a job\n"
         "/unpin all — Clear all pins\n"
@@ -354,21 +356,38 @@ async def cmd_unpin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # Watch / poll
 # ======================================================================
 
+def _format_watched_list() -> str:
+    """Format the current watch list."""
+    if not tracked_jobs:
+        return "Not currently watching any jobs."
+    lines = [f"👁️ <b>Watching {len(tracked_jobs)} jobs:</b>\n"]
+    for jid, jname in tracked_jobs.items():
+        lines.append(f"  <code>{jid}</code> (<b>{html.escape(jname)}</b>)")
+    return "\n".join(lines)
+
+
 async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start background polling.
 
     /watch           — watch all currently active jobs
     /watch id1,id2   — watch specific job IDs
+    /watch list      — show currently watched jobs
     """
     if not is_authorized(update):
         return
+
+    # /watch list — show current watch list
+    if context.args and context.args[0].lower() == "list":
+        await _reply(update, _format_watched_list())
+        return
+
     if err := _check_ssh():
         await update.message.reply_text(err)
         return
 
     global polling_task
     if polling_task and not polling_task.done():
-        await update.message.reply_text("👁️ Already watching. Use /stop to cancel first.")
+        await update.message.reply_text("👁️ Already watching. Use /stop all to cancel first.")
         return
 
     interval = _poll_interval()
@@ -379,7 +398,7 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         raw = " ".join(context.args)
         ids = [x.strip() for x in raw.replace(",", " ").split() if x.strip().isdigit()]
         if not ids:
-            await update.message.reply_text("Usage: /watch or /watch &lt;id1,id2,...&gt;")
+            await update.message.reply_text("Usage: /watch, /watch &lt;id1,id2,...&gt;, or /watch list")
             return
         for jid in ids:
             info = monitor.get_job_detail(jid)
@@ -461,17 +480,61 @@ async def _poll_loop(bot, chat_id: int, interval: int) -> None:
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/stop all — stop watching all jobs.
+    /stop id1,id2 — stop watching specific jobs only.
+    """
     if not is_authorized(update):
         return
 
     global polling_task
-    if polling_task and not polling_task.done():
+    if not polling_task or polling_task.done():
+        await update.message.reply_text("Not currently watching.")
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: /stop all or /stop &lt;id1,id2,...&gt;"
+        )
+        return
+
+    if args[0].lower() == "all":
         polling_task.cancel()
         polling_task = None
         tracked_jobs.clear()
-        await update.message.reply_text("🛑 Stopped watching.")
+        await update.message.reply_text("🛑 Stopped watching all jobs.")
+        return
+
+    # Stop specific jobs
+    raw = " ".join(args)
+    ids_to_remove = [x.strip() for x in raw.replace(",", " ").split() if x.strip().isdigit()]
+    if not ids_to_remove:
+        await update.message.reply_text("Usage: /stop all or /stop &lt;id1,id2,...&gt;")
+        return
+
+    removed = []
+    not_found = []
+    for jid in ids_to_remove:
+        if jid in tracked_jobs:
+            name = tracked_jobs.pop(jid)
+            removed.append(f"<code>{jid}</code> (<b>{html.escape(name)}</b>)")
+        else:
+            not_found.append(jid)
+
+    lines = []
+    if removed:
+        lines.append("🛑 Stopped watching:\n" + "\n".join(f"  {r}" for r in removed))
+    if not_found:
+        lines.append(f"Not watched: {', '.join(not_found)}")
+    if tracked_jobs:
+        lines.append(f"\n👁️ Still watching {len(tracked_jobs)} jobs.")
     else:
-        await update.message.reply_text("Not currently watching.")
+        # No more jobs to watch — cancel the poll loop
+        polling_task.cancel()
+        polling_task = None
+        lines.append("\n🛑 No jobs left. Stopped watching.")
+
+    await _reply(update, "\n".join(lines))
 
 
 async def cmd_ssh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -544,8 +607,8 @@ def main() -> None:
             ("log", "Tail job stdout or grep keyword"),
             ("output", "Show job output file paths"),
             ("cancel", "Cancel a job or all jobs"),
-            ("watch", "Watch jobs, notify on changes"),
-            ("stop", "Stop watching"),
+            ("watch", "Watch jobs or list watched (/watch list)"),
+            ("stop", "Stop watching all or specific jobs"),
             ("pin", "Pin a job to always show in /status"),
             ("unpin", "Unpin a job"),
             ("ssh", "Check SSH connection status"),

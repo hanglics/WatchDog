@@ -92,7 +92,9 @@ You will be prompted for your password and MFA code in the terminal. After authe
 | `/cancel all` | Cancel all your jobs |
 | `/watch` | Watch all active jobs; notify on state changes and completion |
 | `/watch <id1,id2,...>` | Watch specific jobs only |
-| `/stop` | Stop watching |
+| `/watch list` | Show currently watched jobs |
+| `/stop all` | Stop watching all jobs |
+| `/stop <id1,id2,...>` | Stop watching specific jobs |
 | `/pin <job_id>` | Pin a job so it always appears in `/status` even after finishing |
 | `/pin` | List all pinned jobs |
 | `/unpin <job_id>` | Unpin a job |
