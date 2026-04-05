@@ -271,7 +271,7 @@ class SlurmMonitor:
             ("my_pending", cmd_my_pos),
             ("gpu", cmd_gpu),
         ]:
-            stdout, _, _ = self.ssh.run_command(cmd, timeout=15)
+            stdout, _, _ = self.ssh.run_command(cmd, timeout=30)
             results[label] = stdout.strip()
 
         total = results["total"].strip()
@@ -313,7 +313,7 @@ class SlurmMonitor:
             f"sshare -u {self.slurm_user} --noheader "
             f"--format='Account,User,RawShares,NormShares,RawUsage,NormUsage,FairShare'"
         )
-        stdout, stderr, rc = self.ssh.run_command(cmd, timeout=15)
+        stdout, stderr, rc = self.ssh.run_command(cmd, timeout=30)
         if rc != 0 or not stdout.strip():
             return f"Could not retrieve fairshare info: {_esc(stderr.strip())}"
 
@@ -330,7 +330,7 @@ class SlurmMonitor:
             f"--format='%.10i %.10Y %.10A %.10F %.10J %.10P %.10Q' "
             f"| head -10"
         )
-        pstdout, _, prc = self.ssh.run_command(cmd_prio, timeout=15)
+        pstdout, _, prc = self.ssh.run_command(cmd_prio, timeout=30)
         if prc == 0 and pstdout.strip():
             lines.append("\n<b>Pending job priorities:</b>")
             lines.append("<code>JobID      Priority   Age        FairShare  JobSize    Partition  QOS</code>")
@@ -347,19 +347,19 @@ class SlurmMonitor:
         """Tail the stdout file of a job, optionally grep for a pattern."""
         # Get the stdout path from scontrol
         cmd = f"scontrol show job {job_id} 2>/dev/null | grep StdOut"
-        stdout, _, rc = self.ssh.run_command(cmd, timeout=15)
+        stdout, _, rc = self.ssh.run_command(cmd, timeout=30)
 
         if rc != 0 or not stdout.strip():
             # Try sacct for completed jobs
             cmd2 = f"sacct -j {job_id} --format='JobID,WorkDir' --noheader --parsable2 | grep -v '\\.' | head -1"
-            stdout2, _, _ = self.ssh.run_command(cmd2, timeout=15)
+            stdout2, _, _ = self.ssh.run_command(cmd2, timeout=30)
             if stdout2.strip():
                 parts = stdout2.strip().split("|")
                 if len(parts) >= 2:
                     workdir = parts[1].strip()
                     # Try common patterns
                     cmd3 = f"ls -t {workdir}/slurm-{job_id}*.out 2>/dev/null | head -1"
-                    stdout3, _, _ = self.ssh.run_command(cmd3, timeout=15)
+                    stdout3, _, _ = self.ssh.run_command(cmd3, timeout=30)
                     if stdout3.strip():
                         log_path = stdout3.strip()
                     else:
@@ -406,12 +406,12 @@ class SlurmMonitor:
     def get_job_output_path(self, job_id: str) -> str:
         """Get the output file path for a job."""
         cmd = f"scontrol show job {job_id} 2>/dev/null | grep -E 'StdOut|StdErr|WorkDir'"
-        stdout, _, rc = self.ssh.run_command(cmd, timeout=15)
+        stdout, _, rc = self.ssh.run_command(cmd, timeout=30)
 
         if rc != 0 or not stdout.strip():
             # Fallback to sacct
             cmd2 = f"sacct -j {job_id} --format='JobID,WorkDir' --noheader --parsable2 | grep -v '\\.' | head -1"
-            stdout2, _, _ = self.ssh.run_command(cmd2, timeout=15)
+            stdout2, _, _ = self.ssh.run_command(cmd2, timeout=30)
             if stdout2.strip():
                 parts = stdout2.strip().split("|")
                 if len(parts) >= 2:

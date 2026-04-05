@@ -70,7 +70,7 @@ class SSHManager:
         print("[SSH] Connection may have failed (control socket not ready).")
         return False
 
-    def run_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+    def run_command(self, command: str, timeout: int = 60) -> tuple[str, str, int]:
         """Run a command over the persistent SSH connection.
 
         Returns (stdout, stderr, returncode).
