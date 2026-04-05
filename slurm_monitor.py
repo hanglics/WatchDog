@@ -115,7 +115,7 @@ class SlurmMonitor:
         """Get all active jobs (running + pending) for the user."""
         cmd = (
             f"squeue -u {self.slurm_user} "
-            f"--format='%i|%j|%T|%M|%l|%P|%D|%R|%r' "
+            f"--format=\"%i|%j|%T|%M|%l|%P|%D|%R|%r\" "
             f"--noheader"
         )
         stdout, stderr, rc = self.ssh.run_command(cmd)
@@ -127,7 +127,7 @@ class SlurmMonitor:
         """Get details for a specific job (active or completed)."""
         cmd = (
             f"squeue -j {job_id} "
-            f"--format='%i|%j|%T|%M|%l|%P|%D|%R|%r' "
+            f"--format=\"%i|%j|%T|%M|%l|%P|%D|%R|%r\" "
             f"--noheader"
         )
         stdout, stderr, rc = self.ssh.run_command(cmd)
@@ -163,7 +163,7 @@ class SlurmMonitor:
         """Recent completed jobs via sacct."""
         cmd = (
             f"sacct -u {self.slurm_user} "
-            f"--format='JobID,JobName%30,State,Elapsed,ExitCode,End' "
+            f"--format=\"JobID,JobName%30,State,Elapsed,ExitCode,End\" "
             f"--noheader --parsable2 "
             f"--starttime=now-7days "
             f"| grep -v '\\.' | tail -n {count}"
@@ -189,7 +189,7 @@ class SlurmMonitor:
         """Recently failed/cancelled jobs."""
         cmd = (
             f"sacct -u {self.slurm_user} "
-            f"--format='JobID,JobName%30,State,Elapsed,ExitCode,End' "
+            f"--format=\"JobID,JobName%30,State,Elapsed,ExitCode,End\" "
             f"--noheader --parsable2 "
             f"--starttime=now-7days --state=FAILED,CANCELLED,TIMEOUT,NODE_FAIL,OUT_OF_MEMORY "
             f"| grep -v '\\.'"
@@ -222,7 +222,7 @@ class SlurmMonitor:
 
         if job.is_pending:
             # Try to get estimated start time
-            cmd = f"squeue -j {job_id} --format='%S' --noheader"
+            cmd = f"squeue -j {job_id} --format=\"%S\" --noheader"
             stdout, _, _ = self.ssh.run_command(cmd)
             start_est = stdout.strip().strip("'")
             if start_est and start_est != "N/A":
@@ -255,12 +255,12 @@ class SlurmMonitor:
         cmd_pending = "squeue --noheader -t PENDING | wc -l"
         cmd_my_pos = (
             f"squeue -u {self.slurm_user} -t PENDING "
-            f"--format='%i|%Q' --noheader --sort=-Q"
+            f"--format=\"%i|%Q\" --noheader --sort=-Q"
         )
         # GPU partition info
         cmd_gpu = (
             "sinfo -p gpu_cuda --noheader "
-            "--format='%P|%a|%D|%T|%C'"
+            "--format=\"%P|%a|%D|%T|%C\""
         )
 
         results = {}
@@ -311,7 +311,7 @@ class SlurmMonitor:
         """User's fairshare / priority info."""
         cmd = (
             f"sshare -u {self.slurm_user} --noheader "
-            f"--format='Account,User,RawShares,NormShares,RawUsage,NormUsage,FairShare'"
+            f"--format=\"Account,User,RawShares,NormShares,RawUsage,NormUsage,FairShare\""
         )
         stdout, stderr, rc = self.ssh.run_command(cmd, timeout=30)
         if rc != 0 or not stdout.strip():
@@ -327,7 +327,7 @@ class SlurmMonitor:
         # Also get priority of pending jobs
         cmd_prio = (
             f"sprio -u {self.slurm_user} --noheader "
-            f"--format='%.10i %.10Y %.10A %.10F %.10J %.10P %.10Q' "
+            f"--format=\"%.10i %.10Y %.10A %.10F %.10J %.10P %.10Q\" "
             f"| head -10"
         )
         pstdout, _, prc = self.ssh.run_command(cmd_prio, timeout=30)
@@ -351,7 +351,7 @@ class SlurmMonitor:
 
         if rc != 0 or not stdout.strip():
             # Try sacct for completed jobs
-            cmd2 = f"sacct -j {job_id} --format='JobID,WorkDir' --noheader --parsable2 | grep -v '\\.' | head -1"
+            cmd2 = f"sacct -j {job_id} --format=\"JobID,WorkDir\" --noheader --parsable2 | grep -v '\\.' | head -1"
             stdout2, _, _ = self.ssh.run_command(cmd2, timeout=30)
             if stdout2.strip():
                 parts = stdout2.strip().split("|")
@@ -410,7 +410,7 @@ class SlurmMonitor:
 
         if rc != 0 or not stdout.strip():
             # Fallback to sacct
-            cmd2 = f"sacct -j {job_id} --format='JobID,WorkDir' --noheader --parsable2 | grep -v '\\.' | head -1"
+            cmd2 = f"sacct -j {job_id} --format=\"JobID,WorkDir\" --noheader --parsable2 | grep -v '\\.' | head -1"
             stdout2, _, _ = self.ssh.run_command(cmd2, timeout=30)
             if stdout2.strip():
                 parts = stdout2.strip().split("|")
@@ -434,7 +434,7 @@ class SlurmMonitor:
         """Summary of today's job activity."""
         cmd = (
             f"sacct -u {self.slurm_user} "
-            f"--format='JobID,JobName%30,State,Elapsed,ExitCode' "
+            f"--format=\"JobID,JobName%30,State,Elapsed,ExitCode\" "
             f"--noheader --parsable2 "
             f"--starttime=midnight "
             f"| grep -v '\\.'"
@@ -519,7 +519,8 @@ class SlurmMonitor:
     def _parse_squeue(self, stdout: str) -> list[JobInfo]:
         jobs = []
         for line in stdout.strip().splitlines():
-            line = line.strip().strip("'")
+            line = line.strip().strip("'\"")
+
             if not line:
                 continue
             parts = line.split("|")
@@ -541,7 +542,7 @@ class SlurmMonitor:
     def _get_completed_job(self, job_id: str) -> JobInfo | None:
         cmd = (
             f"sacct -j {job_id} "
-            f"--format='JobID,JobName,State,Elapsed,Timelimit,Partition,NNodes,NodeList' "
+            f"--format=\"JobID,JobName,State,Elapsed,Timelimit,Partition,NNodes,NodeList\" "
             f"--noheader --parsable2"
         )
         stdout, _, rc = self.ssh.run_command(cmd)
