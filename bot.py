@@ -34,6 +34,18 @@ polling_task: asyncio.Task | None = None
 tracked_jobs: dict[str, str] = {}
 # {job_id: job_name} for pinned jobs (always shown in /status)
 pinned_jobs: dict[str, str] = {}
+MAX_TELEGRAM_MESSAGE = 3800
+GROUP_BY_ALIASES = {
+    "qos": "qos",
+    "qoses": "qos",
+    "partition": "partition",
+    "partitions": "partition",
+    "part": "partition",
+}
+WATCH_USAGE = (
+    "Usage: /watch, /watch &lt;id1,id2,...&gt;, "
+    "/watch qos &lt;name&gt;, /watch partition &lt;name&gt;, or /watch list"
+)
 
 
 def get_env(key: str) -> str:
@@ -56,17 +68,19 @@ def is_authorized(update: Update) -> bool:
 
 async def _reply(update: Update, text: str) -> None:
     """Send an HTML-formatted reply, falling back to plain text on parse error."""
-    try:
-        await update.message.reply_text(text, parse_mode="HTML")
-    except Exception:
-        await update.message.reply_text(text)
+    for chunk in _split_message(text):
+        try:
+            await update.message.reply_text(chunk, parse_mode="HTML")
+        except Exception:
+            await update.message.reply_text(chunk)
 
 
 async def _send(bot, chat_id: int, text: str) -> None:
-    try:
-        await bot.send_message(chat_id, text, parse_mode="HTML")
-    except Exception:
-        await bot.send_message(chat_id, text)
+    for chunk in _split_message(text):
+        try:
+            await bot.send_message(chat_id, chunk, parse_mode="HTML")
+        except Exception:
+            await bot.send_message(chat_id, chunk)
 
 
 def _check_ssh() -> str | None:
@@ -74,6 +88,126 @@ def _check_ssh() -> str | None:
     if not ssh or not ssh.is_connected:
         return "❌ SSH not connected. Run the monitor script first."
     return None
+
+
+def _split_message(text: str, limit: int = MAX_TELEGRAM_MESSAGE) -> list[str]:
+    """Split long Telegram messages on line boundaries when possible."""
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    current = []
+    current_len = 0
+
+    for line in text.splitlines(keepends=True):
+        if len(line) > limit:
+            if current:
+                chunks.append("".join(current).rstrip("\n"))
+                current = []
+                current_len = 0
+            for start in range(0, len(line), limit):
+                chunks.append(line[start:start + limit].rstrip("\n"))
+            continue
+
+        if current and current_len + len(line) > limit:
+            chunks.append("".join(current).rstrip("\n"))
+            current = []
+            current_len = 0
+
+        current.append(line)
+        current_len += len(line)
+
+    if current:
+        chunks.append("".join(current).rstrip("\n"))
+
+    return chunks or [text]
+
+
+def _parse_group_by(args: list[str], command: str) -> str:
+    if not args:
+        return "qos"
+    if len(args) == 1 and args[0].lower() in GROUP_BY_ALIASES:
+        return GROUP_BY_ALIASES[args[0].lower()]
+    raise ValueError(f"Usage: /{command} [qos|partition]")
+
+
+def _add_watch_filter(filters: dict[str, str], key: str, value: str) -> None:
+    values = [part.strip() for part in value.split(",") if part.strip()]
+    if not values:
+        raise ValueError(WATCH_USAGE)
+    existing = filters.get(key)
+    filters[key] = ",".join([existing, *values] if existing else values)
+
+
+def _parse_watch_args(args: list[str]) -> tuple[list[str], dict[str, str]]:
+    ids: list[str] = []
+    filters: dict[str, str] = {}
+    filter_keys = {
+        "qos": "qos",
+        "--qos": "qos",
+        "partition": "partition",
+        "--partition": "partition",
+        "part": "partition",
+        "--part": "partition",
+    }
+    filter_prefixes = {
+        "qos=": "qos",
+        "--qos=": "qos",
+        "partition=": "partition",
+        "--partition=": "partition",
+        "part=": "partition",
+        "--part=": "partition",
+    }
+
+    index = 0
+    while index < len(args):
+        token = args[index].strip()
+        lower = token.lower()
+
+        matched_filter = False
+        for prefix, key in filter_prefixes.items():
+            if lower.startswith(prefix):
+                _add_watch_filter(filters, key, token[len(prefix):])
+                matched_filter = True
+                break
+        if matched_filter:
+            index += 1
+            continue
+
+        if lower in filter_keys:
+            index += 1
+            if index >= len(args):
+                raise ValueError(WATCH_USAGE)
+            _add_watch_filter(filters, filter_keys[lower], args[index])
+            index += 1
+            continue
+
+        job_ids = [part.strip() for part in token.replace(",", " ").split() if part.strip()]
+        if job_ids and all(job_id.isdigit() for job_id in job_ids):
+            ids.extend(job_ids)
+            index += 1
+            continue
+
+        raise ValueError(WATCH_USAGE)
+
+    return ids, filters
+
+
+def _matches_watch_filters(job, filters: dict[str, str]) -> bool:
+    for attr, requested in filters.items():
+        values = {part.strip().lower() for part in requested.split(",") if part.strip()}
+        if values and getattr(job, attr, "").strip().lower() not in values:
+            return False
+    return True
+
+
+def _format_watch_filters(filters: dict[str, str]) -> str:
+    parts = []
+    if filters.get("qos"):
+        parts.append(f"QoS={html.escape(filters['qos'])}")
+    if filters.get("partition"):
+        parts.append(f"Partition={html.escape(filters['partition'])}")
+    return f" matching {', '.join(parts)}" if parts else ""
 
 
 # ======================================================================
@@ -87,12 +221,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update,
         "🖥️ <b>Bunya Monitor Bot</b>\n\n"
         "<b>Status</b>\n"
-        "/status — All active jobs (+ pinned)\n"
+        "/status [qos|partition] — All active jobs (+ pinned), grouped\n"
         "/status &lt;job_id&gt; — Specific job detail\n"
         "/eta &lt;job_id&gt; — Estimated remaining time\n"
         "/queue — Cluster queue overview\n"
         "/fairshare — Your fairshare / priority\n"
-        "/summary — Today's job activity digest\n"
+        "/summary [qos|partition] — Today's job activity digest\n"
         "/history [N] — Last N completed jobs\n"
         "/failed — Recently failed jobs\n\n"
         "<b>Logs</b>\n"
@@ -103,6 +237,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/cancel &lt;job_id&gt; — Cancel a job\n"
         "/cancel all — Cancel all your jobs\n"
         "/watch — Watch all active jobs\n"
+        "/watch qos &lt;name&gt; — Watch active jobs in a QoS\n"
+        "/watch partition &lt;name&gt; — Watch active jobs in a partition\n"
         "/watch &lt;id1,id2,...&gt; — Watch specific jobs\n"
         "/watch list — Show watched jobs\n"
         "/stop all — Stop watching all jobs\n"
@@ -130,7 +266,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             else:
                 await update.message.reply_text(f"Job {args[0]} not found.")
         else:
-            summary = monitor.get_summary()
+            group_by = _parse_group_by(args, "status")
+            summary = monitor.get_summary(group_by=group_by)
             # Append pinned jobs that are no longer active
             if pinned_jobs:
                 active_ids = {line.split("</code>")[0].split(">")[-1]
@@ -146,6 +283,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 if extra:
                     summary += "\n\n<b>Pinned:</b>\n" + "\n".join(extra)
             await _reply(update, summary)
+    except ValueError as e:
+        await update.message.reply_text(str(e))
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
@@ -301,8 +440,11 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     try:
-        result = monitor.get_daily_summary()
+        group_by = _parse_group_by(context.args, "summary")
+        result = monitor.get_daily_summary(group_by=group_by)
         await _reply(update, result)
+    except ValueError as e:
+        await update.message.reply_text(str(e))
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
@@ -371,6 +513,8 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     /watch           — watch all currently active jobs
     /watch id1,id2   — watch specific job IDs
+    /watch qos gpu   — watch active jobs in a QoS
+    /watch partition gpu_cuda — watch active jobs in a partition
     /watch list      — show currently watched jobs
     """
     if not is_authorized(update):
@@ -393,23 +537,33 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     interval = _poll_interval()
     tracked_jobs.clear()
 
+    try:
+        ids, filters = _parse_watch_args(context.args)
+    except ValueError as e:
+        await _reply(update, str(e))
+        return
+
     if context.args:
-        # Parse comma-separated job IDs (also handles space-separated)
-        raw = " ".join(context.args)
-        ids = [x.strip() for x in raw.replace(",", " ").split() if x.strip().isdigit()]
-        if not ids:
-            await update.message.reply_text("Usage: /watch, /watch &lt;id1,id2,...&gt;, or /watch list")
-            return
-        for jid in ids:
-            info = monitor.get_job_detail(jid)
-            tracked_jobs[jid] = info.name if info else "unknown"
+        if ids:
+            for jid in ids:
+                info = monitor.get_job_detail(jid)
+                if filters and (not info or not _matches_watch_filters(info, filters)):
+                    continue
+                tracked_jobs[jid] = info.name if info else "unknown"
+        else:
+            jobs = monitor.get_active_jobs(
+                qos=filters.get("qos"),
+                partition=filters.get("partition"),
+            )
+            for j in jobs:
+                tracked_jobs[j.job_id] = j.name
     else:
         jobs = monitor.get_active_jobs()
         for j in jobs:
             tracked_jobs[j.job_id] = j.name
 
     if not tracked_jobs:
-        await update.message.reply_text("✅ No active jobs to watch.")
+        await _reply(update, f"✅ No active jobs{_format_watch_filters(filters)} to watch.")
         return
 
     job_list = "\n".join(
@@ -417,7 +571,8 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         for jid, jname in tracked_jobs.items()
     )
     await _reply(update,
-        f"👁️ Watching <b>{len(tracked_jobs)}</b> jobs (poll every {interval}s):\n{job_list}"
+        f"👁️ Watching <b>{len(tracked_jobs)}</b> jobs{_format_watch_filters(filters)} "
+        f"(poll every {interval}s):\n{job_list}"
     )
 
     polling_task = asyncio.create_task(
@@ -597,17 +752,17 @@ def main() -> None:
     # Register command menu with Telegram so it shows in the "/" autocomplete
     async def post_init(application: Application) -> None:
         await application.bot.set_my_commands([
-            ("status", "All active jobs (+ pinned)"),
+            ("status", "All active jobs grouped by qos/partition"),
             ("eta", "Estimated remaining time for a job"),
             ("queue", "Cluster queue overview"),
             ("fairshare", "Your fairshare / priority"),
-            ("summary", "Today's job activity digest"),
+            ("summary", "Today's digest grouped by qos/partition"),
             ("history", "Last N completed jobs"),
             ("failed", "Recently failed jobs"),
             ("log", "Tail job stdout or grep keyword"),
             ("output", "Show job output file paths"),
             ("cancel", "Cancel a job or all jobs"),
-            ("watch", "Watch jobs or list watched (/watch list)"),
+            ("watch", "Watch jobs, optionally by qos/partition"),
             ("stop", "Stop watching all or specific jobs"),
             ("pin", "Pin a job to always show in /status"),
             ("unpin", "Unpin a job"),

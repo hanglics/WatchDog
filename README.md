@@ -67,12 +67,12 @@ You will be prompted for your password and MFA code in the terminal. After authe
 
 | Command | Description |
 |---------|-------------|
-| `/status` | All active jobs with running/pending counts |
+| `/status [qos\|partition]` | All active jobs grouped by QoS or partition (defaults to QoS) |
 | `/status <job_id>` | Detailed info for a specific job |
 | `/eta <job_id>` | Time used vs time limit, max remaining time |
 | `/queue` | Cluster-wide queue: total jobs, GPU partition info, your queue position |
 | `/fairshare` | Your fairshare score and pending job priorities |
-| `/summary` | Today's digest: completed, failed, cancelled counts and total compute time |
+| `/summary [qos\|partition]` | Today's digest with active jobs grouped by QoS or partition |
 | `/history [N]` | Last N completed jobs with state and exit codes (default 10) |
 | `/failed` | Failed/cancelled/timed-out jobs from the last 7 days |
 
@@ -91,6 +91,8 @@ You will be prompted for your password and MFA code in the terminal. After authe
 | `/cancel <job_id>` | Cancel a specific job |
 | `/cancel all` | Cancel all your jobs |
 | `/watch` | Watch all active jobs; notify on state changes and completion |
+| `/watch qos <name>` or `/watch --qos=<name>` | Watch active jobs in a QoS only |
+| `/watch partition <name>` or `/watch --partition=<name>` | Watch active jobs in a partition only |
 | `/watch <id1,id2,...>` | Watch specific jobs only |
 | `/watch list` | Show currently watched jobs |
 | `/stop all` | Stop watching all jobs |
@@ -108,6 +110,8 @@ You will be prompted for your password and MFA code in the terminal. After authe
 
 1. Submit your jobs to the cluster
 2. Send `/watch` (or `/watch 123,456,789` for specific jobs)
+   - Use `/watch qos gpu` or `/watch --qos=sxm` to watch a QoS only
+   - Use `/watch partition gpu_cuda` or `/watch --partition=gpu_sxm` to watch a partition only
 3. The bot polls every `POLL_INTERVAL` seconds and sends you notifications:
    - State changes: `PENDING -> RUNNING`
    - Completions: `COMPLETED` or `FAILED` with exit info

@@ -2,9 +2,12 @@
 
 import html
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 
 from ssh_manager import SSHManager
+
+SQUEUE_FORMAT = "%i|%j|%T|%M|%l|%P|%D|%R|%r|%q|%S"
 
 
 def _esc(text: str) -> str:
@@ -47,6 +50,41 @@ def _format_duration(seconds: int) -> str:
     return f"{m}m {s}s"
 
 
+def _has_start_time(start_time: str) -> bool:
+    return start_time.strip() not in ("", "N/A", "None", "Unknown", "(null)")
+
+
+def _filter_values(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {part.strip().lower() for part in value.split(",") if part.strip()}
+
+
+def _matches_filter(actual: str, requested: str | None) -> bool:
+    requested_values = _filter_values(requested)
+    if not requested_values:
+        return True
+    return actual.strip().lower() in requested_values
+
+
+def _normalize_group_by(group_by: str | None) -> str:
+    aliases = {
+        "qos": "qos",
+        "qoses": "qos",
+        "partition": "partition",
+        "partitions": "partition",
+        "part": "partition",
+    }
+    key = (group_by or "qos").strip().lower()
+    if key not in aliases:
+        raise ValueError("group_by must be 'qos' or 'partition'")
+    return aliases[key]
+
+
+def _group_label(group_by: str) -> str:
+    return "QoS" if group_by == "qos" else "Partition"
+
+
 @dataclass
 class JobInfo:
     job_id: str
@@ -58,6 +96,8 @@ class JobInfo:
     nodes: str
     node_list: str
     reason: str
+    qos: str = ""
+    start_time: str = ""
 
     @property
     def is_running(self) -> bool:
@@ -84,7 +124,10 @@ class JobInfo:
         return f"<code>{self.job_id}</code> (<b>{_esc(self.name)}</b>)"
 
     def format_short(self) -> str:
-        return f"{self.state_emoji} {self.label} — {self.state} ({self.time_used})"
+        details = f"{self.state} ({self.time_used})"
+        if self.is_pending and _has_start_time(self.start_time):
+            details += f", starts {_esc(self.start_time)}"
+        return f"{self.state_emoji} {self.label} — {details}"
 
     def format_detail(self) -> str:
         lines = [
@@ -92,9 +135,12 @@ class JobInfo:
             f"  State: {self.state}",
             f"  Time Used: {self.time_used}",
             f"  Time Limit: {self.time_limit}",
-            f"  Partition: {self.partition}",
+            f"  Partition: {_esc(self.partition)}",
+            f"  QoS: {_esc(self.qos) if self.qos else 'N/A'}",
             f"  Nodes: {self.nodes} ({_esc(self.node_list)})",
         ]
+        if self.is_pending and _has_start_time(self.start_time):
+            lines.append(f"  Estimated Start: {_esc(self.start_time)}")
         if self.reason and self.reason != "None":
             lines.append(f"  Reason: {_esc(self.reason)}")
         return "\n".join(lines)
@@ -111,23 +157,31 @@ class SlurmMonitor:
     # Core queries
     # ------------------------------------------------------------------
 
-    def get_active_jobs(self) -> list[JobInfo]:
+    def get_active_jobs(
+        self,
+        qos: str | None = None,
+        partition: str | None = None,
+    ) -> list[JobInfo]:
         """Get all active jobs (running + pending) for the user."""
         cmd = (
             f"squeue -u {self.slurm_user} "
-            f"--format=\"%i|%j|%T|%M|%l|%P|%D|%R|%r\" "
+            f"--format=\"{SQUEUE_FORMAT}\" "
             f"--noheader"
         )
         stdout, stderr, rc = self.ssh.run_command(cmd)
         if rc != 0:
             raise RuntimeError(f"squeue failed: {stderr}")
-        return self._parse_squeue(stdout)
+        jobs = self._parse_squeue(stdout)
+        return [
+            job for job in jobs
+            if _matches_filter(job.qos, qos) and _matches_filter(job.partition, partition)
+        ]
 
     def get_job_detail(self, job_id: str) -> JobInfo | None:
         """Get details for a specific job (active or completed)."""
         cmd = (
             f"squeue -j {job_id} "
-            f"--format=\"%i|%j|%T|%M|%l|%P|%D|%R|%r\" "
+            f"--format=\"{SQUEUE_FORMAT}\" "
             f"--noheader"
         )
         stdout, stderr, rc = self.ssh.run_command(cmd)
@@ -221,12 +275,13 @@ class SlurmMonitor:
             return f"Job {job_id} not found."
 
         if job.is_pending:
-            # Try to get estimated start time
-            cmd = f"squeue -j {job_id} --format=\"%S\" --noheader"
-            stdout, _, _ = self.ssh.run_command(cmd)
-            start_est = stdout.strip().strip("'")
-            if start_est and start_est != "N/A":
-                return f"🟡 Job {job.label} is PENDING.\n  Estimated start: {start_est}"
+            start_est = job.start_time
+            if not _has_start_time(start_est):
+                cmd = f"squeue -j {job_id} --format=\"%S\" --noheader"
+                stdout, _, _ = self.ssh.run_command(cmd)
+                start_est = stdout.strip().strip("'")
+            if _has_start_time(start_est):
+                return f"🟡 Job {job.label} is PENDING.\n  Estimated start: {_esc(start_est)}"
             return f"🟡 Job {job.label} is PENDING. No estimated start time."
 
         if not job.is_running:
@@ -430,8 +485,10 @@ class SlurmMonitor:
     # Daily summary
     # ------------------------------------------------------------------
 
-    def get_daily_summary(self) -> str:
+    def get_daily_summary(self, group_by: str = "qos") -> str:
         """Summary of today's job activity."""
+        group_by = _normalize_group_by(group_by)
+        label = _group_label(group_by)
         cmd = (
             f"sacct -u {self.slurm_user} "
             f"--format=\"JobID,JobName%30,State,Elapsed,ExitCode\" "
@@ -477,16 +534,12 @@ class SlurmMonitor:
         ]
 
         if running:
-            lines.append("\n<b>Currently running:</b>")
-            for j in running:
-                lines.append(f"  {j.format_short()}")
+            lines.append(f"\n<b>Currently running by {label}:</b>")
+            lines.extend(self._format_grouped_jobs(running, group_by))
 
         if pending:
-            lines.append("\n<b>Queued:</b>")
-            for j in pending[:10]:
-                lines.append(f"  {j.format_short()}")
-            if len(pending) > 10:
-                lines.append(f"  ... and {len(pending) - 10} more")
+            lines.append(f"\n<b>Queued by {label}:</b>")
+            lines.extend(self._format_grouped_jobs(pending, group_by))
 
         return "\n".join(lines)
 
@@ -494,8 +547,10 @@ class SlurmMonitor:
     # Formatting helpers
     # ------------------------------------------------------------------
 
-    def get_summary(self) -> str:
+    def get_summary(self, group_by: str = "qos") -> str:
         """Get a formatted summary of all active jobs."""
+        group_by = _normalize_group_by(group_by)
+        label = _group_label(group_by)
         jobs = self.get_active_jobs()
 
         if not jobs:
@@ -504,13 +559,37 @@ class SlurmMonitor:
         running = [j for j in jobs if j.is_running]
         pending = [j for j in jobs if j.is_pending]
 
-        lines = [f"📊 <b>Active Jobs: {len(jobs)}</b> (🟢 {len(running)} running, 🟡 {len(pending)} pending)"]
-        lines.append("")
+        lines = [
+            f"📊 <b>Active Jobs: {len(jobs)}</b> (🟢 {len(running)} running, 🟡 {len(pending)} pending)",
+            f"Grouped by {label}.",
+        ]
 
-        for job in sorted(jobs, key=lambda j: (not j.is_running, j.job_id)):
-            lines.append(job.format_short())
+        if running:
+            lines.append(f"\n<b>Running by {label}:</b>")
+            lines.extend(self._format_grouped_jobs(running, group_by))
+
+        if pending:
+            lines.append(f"\n<b>Queued by {label}:</b>")
+            lines.extend(self._format_grouped_jobs(pending, group_by))
 
         return "\n".join(lines)
+
+    def _format_grouped_jobs(self, jobs: list[JobInfo], group_by: str) -> list[str]:
+        grouped: dict[str, list[JobInfo]] = defaultdict(list)
+        for job in jobs:
+            value = job.qos if group_by == "qos" else job.partition
+            grouped[value or "unknown"].append(job)
+
+        lines = []
+        for value in sorted(grouped, key=lambda item: (item == "unknown", item.lower())):
+            group_jobs = sorted(
+                grouped[value],
+                key=lambda j: (not j.is_running, not _has_start_time(j.start_time), j.start_time, j.job_id),
+            )
+            lines.append(f"  <b>{_esc(value)}</b> ({len(group_jobs)}):")
+            for job in group_jobs:
+                lines.append(f"    {job.format_short()}")
+        return lines
 
     # ------------------------------------------------------------------
     # Internal
@@ -526,6 +605,8 @@ class SlurmMonitor:
             parts = line.split("|")
             if len(parts) < 9:
                 continue
+            qos = parts[9].strip() if len(parts) > 9 else ""
+            start_time = parts[10].strip() if len(parts) > 10 else ""
             jobs.append(JobInfo(
                 job_id=parts[0].strip(),
                 name=parts[1].strip(),
@@ -536,13 +617,15 @@ class SlurmMonitor:
                 nodes=parts[6].strip(),
                 node_list=parts[7].strip(),
                 reason=parts[8].strip(),
+                qos=qos,
+                start_time=start_time,
             ))
         return jobs
 
     def _get_completed_job(self, job_id: str) -> JobInfo | None:
         cmd = (
             f"sacct -j {job_id} "
-            f"--format=\"JobID,JobName,State,Elapsed,Timelimit,Partition,NNodes,NodeList\" "
+            f"--format=\"JobID,JobName,State,Elapsed,Timelimit,Partition,NNodes,NodeList,QOS,Start\" "
             f"--noheader --parsable2"
         )
         stdout, _, rc = self.ssh.run_command(cmd)
@@ -555,6 +638,8 @@ class SlurmMonitor:
                 continue
             if "." in parts[0]:
                 continue
+            qos = parts[8].strip() if len(parts) > 8 else ""
+            start_time = parts[9].strip() if len(parts) > 9 else ""
             return JobInfo(
                 job_id=parts[0].strip(),
                 name=parts[1].strip(),
@@ -565,5 +650,7 @@ class SlurmMonitor:
                 nodes=parts[6].strip(),
                 node_list=parts[7].strip(),
                 reason="",
+                qos=qos,
+                start_time=start_time,
             )
         return None
